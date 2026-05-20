@@ -17,20 +17,19 @@ import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
+import urllib.request
+
 import cv2
 import numpy as np
 import torch
 import torchaudio
 
-# MediaPipe в 0.10.20+ переструктурировали API: верхнеуровневый mp.solutions
-# стал ленивым алиасом и иногда не подгружается. Импортируем напрямую из
-# подпакета — это работает во всех релизах 0.10.x.
-try:
-    from mediapipe.python.solutions import face_mesh as mp_face_mesh
-except ImportError:
-    # Запасной путь — на случай очень старого/нового релиза
-    import mediapipe as mp
-    mp_face_mesh = mp.solutions.face_mesh
+# MediaPipe Tasks API (новый). Старый Solutions API убран начиная с
+# 0.10.22 + конфликтует с protobuf 5+, который требует TensorFlow на
+# свежем Colab/Kaggle. Tasks API — официальная замена.
+import mediapipe as mp
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
 
 
 # =============================================================================
@@ -47,6 +46,16 @@ N_MELS: int = 80                # число мел-полос
 # --- Видео ---
 LIP_SIZE: int = 96              # сторона квадратного кропа губ
 LIP_PADDING: float = 0.2        # доп. поля вокруг bbox губ (20%)
+
+# Файл модели FaceLandmarker для Tasks API. ~3 МБ. Скачивается ОДИН РАЗ
+# при первом использовании, кешируется в ~/.cache/avsr/.
+FACE_LANDMARKER_URL: str = (
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+    "face_landmarker/float16/1/face_landmarker.task"
+)
+FACE_LANDMARKER_CACHE: Path = (
+    Path.home() / ".cache" / "avsr" / "face_landmarker.task"
+)
 
 # Индексы ландмарок Face Mesh, относящихся к губам.
 # Берём ВНЕШНИЙ и ВНУТРЕННИЙ контуры губ — это даст полный bbox.
@@ -131,50 +140,85 @@ def waveform_to_mel(
 # ВИДЕО
 # =============================================================================
 
+def _ensure_face_landmarker_model(cache_path: Path = FACE_LANDMARKER_CACHE) -> Path:
+    """Скачивает .task-модель FaceLandmarker, если её ещё нет в кеше."""
+    cache_path = Path(cache_path)
+    if cache_path.exists() and cache_path.stat().st_size > 1_000_000:
+        return cache_path
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    log.info("Скачиваю модель FaceLandmarker в %s ...", cache_path)
+    urllib.request.urlretrieve(FACE_LANDMARKER_URL, str(cache_path))
+    log.info("Модель загружена (%.1f МБ)", cache_path.stat().st_size / 1024**2)
+    return cache_path
+
+
 class LipROIExtractor:
     """
-    Извлекает кроп губ из BGR-кадра через MediaPipe Face Mesh.
+    Извлекает кроп губ из BGR-кадра через MediaPipe FaceLandmarker (Tasks API).
 
     Использование:
-        ext = LipROIExtractor()
-        for frame_bgr in video_frames:
-            lip = ext.extract(frame_bgr)   # np.ndarray (96, 96) uint8 или None
-        ext.close()
-
-    Лучше использовать как context manager:
         with LipROIExtractor() as ext:
-            ...
+            for i, frame_bgr in enumerate(frames):
+                ts_ms = int(i * 1000 / fps)            # для running_mode="video"
+                lip = ext.extract(frame_bgr, ts_ms)    # (96,96) uint8 или None
 
-    Внимание: MediaPipe Face Mesh держит внутри C++ ресурсы — не забывай
+    Внимание: FaceLandmarker держит внутри C++ ресурсы — не забывай
     вызывать .close() (или используй with).
+
+    Параметры:
+        running_mode:
+            "video" — Tasks API в режиме видео-стрима. Использует tracking
+                      между кадрами → быстрее и стабильнее. Требует
+                      монотонно растущих timestamp_ms в .extract().
+            "image" — обрабатывать каждый кадр независимо. Медленнее,
+                      но не нужны timestamps.
     """
 
     def __init__(
         self,
         lip_size: int = LIP_SIZE,
         padding: float = LIP_PADDING,
-        static_image_mode: bool = False,
-        min_detection_confidence: float = 0.5,
+        running_mode: str = "video",
+        min_face_detection_confidence: float = 0.5,
+        min_face_presence_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
+        model_path: Optional[Path] = None,
     ) -> None:
         self.lip_size = lip_size
         self.padding = padding
-        # static_image_mode=False — лучше для видео (использует tracking
-        # между кадрами, быстрее и стабильнее)
-        self.face_mesh = mp_face_mesh.FaceMesh(
-            static_image_mode=static_image_mode,
-            max_num_faces=1,
-            refine_landmarks=False,
-            min_detection_confidence=min_detection_confidence,
+        self.running_mode = running_mode
+
+        # Скачиваем модель, если ещё нет
+        model_path = _ensure_face_landmarker_model(model_path or FACE_LANDMARKER_CACHE)
+
+        rm = (
+            mp_vision.RunningMode.VIDEO if running_mode == "video"
+            else mp_vision.RunningMode.IMAGE
+        )
+        options = mp_vision.FaceLandmarkerOptions(
+            base_options=mp_python.BaseOptions(model_asset_path=str(model_path)),
+            running_mode=rm,
+            num_faces=1,
+            min_face_detection_confidence=min_face_detection_confidence,
+            min_face_presence_confidence=min_face_presence_confidence,
             min_tracking_confidence=min_tracking_confidence,
         )
+        self.landmarker = mp_vision.FaceLandmarker.create_from_options(options)
+        self._last_ts_ms: int = -1   # для гарантии монотонности
 
-    def extract(self, frame_bgr: np.ndarray) -> Optional[np.ndarray]:
+    def extract(
+        self,
+        frame_bgr: np.ndarray,
+        timestamp_ms: Optional[int] = None,
+    ) -> Optional[np.ndarray]:
         """
         Извлекает квадратный кроп губ из одного кадра.
 
         Args:
-            frame_bgr: np.ndarray (H, W, 3), uint8, BGR (как из cv2.imread/cap)
+            frame_bgr:    np.ndarray (H, W, 3), uint8, BGR (как из cv2.imread).
+            timestamp_ms: timestamp в миллисекундах. Нужен только если
+                          running_mode="video". Должен расти от вызова к вызову.
+                          Если None — авто-инкремент на 40 мс (~25 FPS).
 
         Returns:
             np.ndarray (lip_size, lip_size) uint8 — серый кроп губ,
@@ -185,15 +229,25 @@ class LipROIExtractor:
 
         h, w = frame_bgr.shape[:2]
 
-        # MediaPipe ждёт RGB
+        # Tasks API ждёт обёрнутый mp.Image
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        results = self.face_mesh.process(frame_rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
 
-        if not results.multi_face_landmarks:
+        if self.running_mode == "video":
+            # гарантируем строго растущий timestamp
+            if timestamp_ms is None:
+                ts_ms = self._last_ts_ms + 40
+            else:
+                ts_ms = max(int(timestamp_ms), self._last_ts_ms + 1)
+            self._last_ts_ms = ts_ms
+            result = self.landmarker.detect_for_video(mp_image, ts_ms)
+        else:
+            result = self.landmarker.detect(mp_image)
+
+        if not result.face_landmarks:
             return None
 
-        landmarks = results.multi_face_landmarks[0].landmark
-
+        landmarks = result.face_landmarks[0]   # список NormalizedLandmark
         # Координаты губных ландмарок в пикселях
         lip_pts = np.array(
             [[landmarks[i].x * w, landmarks[i].y * h] for i in LIP_LANDMARK_INDICES],
@@ -228,7 +282,11 @@ class LipROIExtractor:
         return resized
 
     def close(self) -> None:
-        self.face_mesh.close()
+        self.landmarker.close()
+
+    def reset_timestamps(self) -> None:
+        """Сбросить внутренний счётчик timestamps — нужно перед новым видео."""
+        self._last_ts_ms = -1
 
     def __enter__(self) -> "LipROIExtractor":
         return self
@@ -270,11 +328,16 @@ def video_to_lip_tensor(
         raise FileNotFoundError(f"OpenCV не смог открыть {video_path}")
 
     fps = float(cap.get(cv2.CAP_PROP_FPS))
+    if fps <= 0:
+        fps = 25.0   # fallback на случай битого хедера
     total_in_header = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     own_extractor = extractor is None
     if extractor is None:
         extractor = LipROIExtractor()
+    else:
+        # новое видео — сбрасываем монотонный счётчик timestamps
+        extractor.reset_timestamps()
 
     frames: list[np.ndarray] = []
     n_total = 0
@@ -285,8 +348,9 @@ def video_to_lip_tensor(
             ret, frame = cap.read()
             if not ret:
                 break
+            ts_ms = int(n_total * 1000.0 / fps)
             n_total += 1
-            crop = extractor.extract(frame)
+            crop = extractor.extract(frame, timestamp_ms=ts_ms)
             if crop is None:
                 n_missing += 1
                 continue
