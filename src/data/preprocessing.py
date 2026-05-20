@@ -18,10 +18,19 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import cv2
-import mediapipe as mp
 import numpy as np
 import torch
 import torchaudio
+
+# MediaPipe в 0.10.20+ переструктурировали API: верхнеуровневый mp.solutions
+# стал ленивым алиасом и иногда не подгружается. Импортируем напрямую из
+# подпакета — это работает во всех релизах 0.10.x.
+try:
+    from mediapipe.python.solutions import face_mesh as mp_face_mesh
+except ImportError:
+    # Запасной путь — на случай очень старого/нового релиза
+    import mediapipe as mp
+    mp_face_mesh = mp.solutions.face_mesh
 
 
 # =============================================================================
@@ -152,7 +161,7 @@ class LipROIExtractor:
         self.padding = padding
         # static_image_mode=False — лучше для видео (использует tracking
         # между кадрами, быстрее и стабильнее)
-        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+        self.face_mesh = mp_face_mesh.FaceMesh(
             static_image_mode=static_image_mode,
             max_num_faces=1,
             refine_landmarks=False,
