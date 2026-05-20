@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Виртуальные окружения
+venv/
+env/
+.venv/
+
+# Данные (НЕ коммитим — слишком тяжёлые)
+data/raw/
+data/processed/
+data/manifests/*.json
+data/manifests/*.csv
+!data/manifests/.gitkeep
+
+# Чекпоинты моделей (тяжёлые)
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Логи экспериментов
+wandb/
+runs/
+lightning_logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Секреты
+.env
+*.key
