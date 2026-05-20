@@ -212,11 +212,22 @@ def main() -> int:
 
     # ---------- 7. Sanity: совпадает ли реальная длина после паддинга ----------
     B, n_mels, T_a_max = batch["audio_mel"].shape
+    n_with_padding = 0
     for i, real_len in enumerate(batch["audio_lens"]):
+        real_len = int(real_len)
+        if real_len >= T_a_max:
+            continue                       # этот пример — самый длинный, паддинга нет
         beyond = batch["audio_mel"][i, :, real_len:].abs().max().item()
-        assert beyond < 1e-8, f"После реальной длины должны быть нули, " \
-                              f"но max = {beyond}"
-    log.info("Паддинг audio_mel заполнен нулями: OK")
+        assert beyond < 1e-8, (
+            f"После реальной длины должны быть нули, но max = {beyond}"
+        )
+        n_with_padding += 1
+    if n_with_padding == 0:
+        log.info("Все примеры в батче одной длины — паддинга проверять нечего "
+                 "(это норма для smoke-теста из копий одного примера).")
+    else:
+        log.info("Паддинг audio_mel заполнен нулями для %d примеров: OK",
+                 n_with_padding)
 
     log.info("")
     log.info("Все проверки пройдены — датасет готов.")
