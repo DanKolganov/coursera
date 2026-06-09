@@ -25,8 +25,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import List, Optional
+
+# Чтобы импорты src.* работали при запуске как `python scripts/eval.py`
+# (Colab не наследует sys.path родительской сессии в подпроцесс)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch

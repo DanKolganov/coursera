@@ -15,7 +15,12 @@ from __future__ import annotations
 
 import argparse
 import random
+import sys
 from pathlib import Path
+
+# Чтобы импорты src.* работали при запуске как `python scripts/train.py`
+# (Colab не наследует sys.path родительской сессии в подпроцесс)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import torch
