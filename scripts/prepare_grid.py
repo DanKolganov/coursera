@@ -189,6 +189,16 @@ def extract_audio(mpg_path: Path, wav_path: Path) -> Optional[float]:
 # Один спикер: видео → wav + .npy + записи
 # =============================================================================
 
+def _find_videos_and_aligns(spk_raw: Path) -> tuple[list[Path], dict[str, Path]]:
+    """
+    Рекурсивный поиск .mpg и .align внутри spk_raw, независимо от структуры
+    распакованного архива (s1/s1/*.mpg vs s1/*.mpg, align/ vs s1/align/, ...).
+    """
+    videos = sorted(spk_raw.rglob("*.mpg"))
+    aligns = {p.stem: p for p in spk_raw.rglob("*.align")}
+    return videos, aligns
+
+
 def process_speaker(spk: str, raw_dir: Path, processed_dir: Path,
                     lip_ext: LipROIExtractor) -> list[dict]:
     """Обрабатывает все видео одного спикера. Возвращает записи манифеста."""
@@ -199,14 +209,15 @@ def process_speaker(spk: str, raw_dir: Path, processed_dir: Path,
     wav_dir.mkdir(parents=True, exist_ok=True)
     lips_dir.mkdir(parents=True, exist_ok=True)
 
-    video_files = sorted((spk_raw / "video").glob("*.mpg"))
-    align_dir = spk_raw / "align"
+    video_files, align_map = _find_videos_and_aligns(spk_raw)
+    log.info("[%s] найдено: %d видео, %d алайнов",
+             spk, len(video_files), len(align_map))
 
     records = []
     for mpg in tqdm(video_files, desc=f"{spk} preprocess", leave=False):
         stem = mpg.stem
-        align_path = align_dir / f"{stem}.align"
-        if not align_path.exists():
+        align_path = align_map.get(stem)
+        if align_path is None:
             continue
 
         text = parse_align(align_path)
@@ -343,8 +354,11 @@ def main() -> int:
     with LipROIExtractor() as lip_ext:
         for spk in speakers:
             spk_raw = raw_dir / spk
-            if not (spk_raw / "video").exists():
-                log.warning("[%s] нет видео — пропуск", spk)
+            # Ищем хотя бы один .mpg рекурсивно (структура архива может
+            # отличаться: s1/s1/*.mpg или s1/*.mpg)
+            has_videos = any(spk_raw.rglob("*.mpg")) if spk_raw.exists() else False
+            if not has_videos:
+                log.warning("[%s] не найдено .mpg в %s — пропуск", spk, spk_raw)
                 continue
             recs = process_speaker(spk, raw_dir, processed_dir, lip_ext)
             all_records.extend(recs)
