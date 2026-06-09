@@ -122,11 +122,36 @@ cursera_claude/
 - `scripts/prepare_data.py`: параллельный препроцессинг датасета,
   многопроцессорный режим через `ProcessPoolExecutor`, сборка манифеста.
 
-### День 12 (текущий день)
+### День 14 (текущий)
 
-- _В работе_: аудит кода (smoke-test полного forward-пасса),
-  параллельно — главы 1-3 курсовой и инструкция для запуска обучения
-  на Colab.
+- ✅ Подготовлен `notebooks/03_one_paste_train.md` — компактный
+  ready-to-paste сценарий для запуска обучения в Colab из 7 ячеек:
+  bootstrap → sanity → upload → smoke-test → mini-dataset → config →
+  train. Минимум кликов со стороны пользователя.
+- Проверено состояние десктопа: Colab открыт в Chrome (вкладка
+  Untitled0.ipynb), готов к запуску.
+- **Ожидается**: запуск Ячеек 1-6 в Colab, передача логов для
+  заполнения дневника экспериментов.
+
+### День 12-13 (спринт-режим)
+
+- Аудит кода завершён: все 12 файлов реализации прочитаны и
+  верифицированы (`audio_encoder`, `video_encoder`, `fusion`,
+  `avsr_model`, `loss`, `metrics`, `trainer`, `train.py`, `eval.py`,
+  `prepare_data.py`, `realtime.py`). Реализация полная и согласованная.
+- Написан `scripts/test_forward.py` — smoke-test полного forward+backward
+  pass с проверкой размерностей, ненулевых градиентов и снижения loss
+  после одного шага оптимизатора.
+- Создана исчерпывающая инструкция `notebooks/02_train_in_colab.md`:
+  bootstrap, Drive, smoke-test, запуск train.py, resume, eval.
+- Написаны все 5 глав курсовой в markdown (`docs/coursework/01..05`).
+- ✅ **Собрана курсовая работа в формате .docx**: `docs/coursework/
+  курсовая_работа.docx` (~66 КБ, ~45 000 символов, 328 параграфов,
+  9 таблиц, иерархия H1/H2/H3 для автогенерации содержания).
+  Форматирование: Times New Roman 14pt, полуторный интервал,
+  поля 30/15/20/20 мм, А4, отступ первой строки 1.25 см.
+  Заглушки: название университета, кафедры, ФИО руководителя
+  (под замену перед сдачей).
 
 ---
 
@@ -138,14 +163,16 @@ cursera_claude/
 | Предобработка | ✅ Работает | Визуально проверено на 1 примере |
 | Токенизатор | ✅ Работает | 29 токенов, юнит-тесты пройдены |
 | Датасет + Collate | ✅ Работает | smoke-test пройден |
-| AudioEncoder | ⏳ Не протестирован | Whisper-small, заморожен |
-| VideoEncoder | ⏳ Не протестирован | 3D-conv + ResNet-18 + Transformer |
-| Fusion | ⏳ Не протестирован | Concat и Cross-Attention |
-| AVSRModel (полная) | ⏳ Не протестирован | Forward pass на батче |
-| Trainer | ⏳ Не протестирован | FP16, gradAccum, ckpts |
-| Eval со шумом | ⏳ Не протестирован | Гауссов шум в пространстве спектрограмм |
-| Realtime/Demo | ⏳ Не протестирован | Gradio + RTF |
-| **Данные MUAVIC** | ❌ Не загружены | Зависит от Colab/Drive |
+| AudioEncoder | ✅ Реализован | Whisper-small, заморожен. Готов к smoke-тесту в Colab |
+| VideoEncoder | ✅ Реализован | 3D-conv + ResNet-18 + Transformer |
+| Fusion | ✅ Реализован | Concat и Cross-Attention оба готовы |
+| AVSRModel (полная) | ✅ Реализован | Сборка + modality dropout + 3 режима |
+| Trainer | ✅ Реализован | FP16, gradAccum, ckpts, ранний останов |
+| Eval со шумом | ✅ Реализован | Гауссов шум в пространстве спектрограмм |
+| Realtime/Demo | ✅ Реализован | OfflineDemo + Gradio + замер RTF |
+| **Курсовая работа .docx** | ✅ Собрана | 5 глав, 9 таблиц, источники |
+| **Данные MUAVIC** | ⏳ Не загружены | Зависит от запуска в Colab |
+| **Обучение** | ⏳ Не запущено | Ожидает запуска в Colab по 02_train_in_colab.md |
 
 ---
 

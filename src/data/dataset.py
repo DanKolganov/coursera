@@ -21,8 +21,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
-import soundfile as sf
 import torch
+import torchaudio
 from torch.utils.data import Dataset
 
 from src.data.preprocessing import (
@@ -191,10 +191,12 @@ class AVSRDataset(Dataset):
 
     def _load_audio(self, path: str) -> torch.Tensor:
         """wav -> log-mel (80, T_a)."""
-        # soundfile быстрее torchaudio.load для wav-файлов
-        wav, sr = sf.read(path, dtype="float32", always_2d=False)
-        wav_t = torch.from_numpy(np.ascontiguousarray(wav))
-        return waveform_to_mel(wav_t, sample_rate=sr)
+        # torchaudio.load вместо soundfile — совместимо с Python 3.12
+        wav, sr = torchaudio.load(path)          # (channels, T), float32
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=True)  # усредняем → моно
+        wav = wav.squeeze(0)                      # (T,)
+        return waveform_to_mel(wav, sample_rate=sr)
 
     def _load_video(self, entry: dict) -> torch.Tensor:
         """Возвращает (T_v, 1, 96, 96), float32 в [0, 1]."""
