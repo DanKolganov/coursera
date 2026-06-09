@@ -1,0 +1,77 @@
+# GRID Corpus: audio-only baseline.
+# Видео-ветка не используется (load_video=False внутри train.py).
+
+experiment:
+  name: grid_audio_only
+  seed: 42
+  output_dir: checkpoints/grid_audio_only
+
+data:
+  # ПУТИ В COLAB: подставь свой $DRIVE_ROOT
+  train_manifest: /content/drive/MyDrive/avsr/grid/manifests/train.jsonl
+  val_manifest:   /content/drive/MyDrive/avsr/grid/manifests/val.jsonl
+  max_duration: 8.0       # GRID-видео ~3 сек, с большим запасом
+  min_duration: 0.5
+  num_workers: 2
+  batch_size: 8           # audio-only на T4 — 8 ok
+  grad_accum: 2           # эффективный батч = 16
+
+audio:
+  sample_rate: 16000
+  n_mels: 80
+  hop_length: 160
+  win_length: 400
+
+video:
+  fps: 25
+  lip_size: 96
+
+model:
+  mode: audio_only        # ВАЖНО: только аудио
+  d_model: 512
+  modality_dropout: 0.0   # для audio-only бесполезно
+
+  audio_encoder:
+    name: openai/whisper-small
+    freeze: true
+    d_audio: 768
+
+  video_encoder:
+    d_video: 512
+    n_layers: 4
+    n_heads: 8
+
+  fusion:
+    type: cross_attention
+    n_layers: 2
+    n_heads: 8
+    dropout: 0.1
+
+training:
+  optimizer: adamw
+  lr: 1.0e-4
+  weight_decay: 0.01
+  warmup_steps: 300       # GRID маленький — короткий warmup
+  max_epochs: 5           # для фиксированной грамматики достаточно
+  patience: 3
+  grad_clip: 5.0
+  mixed_precision: true
+  label_smoothing: 0.0
+
+augmentation:
+  audio:
+    spec_augment: true
+    freq_mask: 27
+    time_mask: 10
+    noise_snr_db: [0, 5, 10, 15, 20]
+    noise_prob: 0.0       # для baseline шум только на eval
+  video:
+    horizontal_flip: 0.5
+    random_crop: 88
+    brightness: 0.2
+
+logging:
+  use_tensorboard: true
+  use_wandb: false
+  log_every_n_steps: 25
+  val_every_n_epochs: 1
