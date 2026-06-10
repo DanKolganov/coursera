@@ -183,6 +183,7 @@ class LipROIExtractor:
         min_face_presence_confidence: float = 0.5,
         min_tracking_confidence: float = 0.5,
         model_path: Optional[Path] = None,
+        delegate: str = "cpu",
     ) -> None:
         self.lip_size = lip_size
         self.padding = padding
@@ -195,34 +196,60 @@ class LipROIExtractor:
             mp_vision.RunningMode.VIDEO if running_mode == "video"
             else mp_vision.RunningMode.IMAGE
         )
-        options = mp_vision.FaceLandmarkerOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=str(model_path)),
-            running_mode=rm,
-            num_faces=1,
-            min_face_detection_confidence=min_face_detection_confidence,
-            min_face_presence_confidence=min_face_presence_confidence,
-            min_tracking_confidence=min_tracking_confidence,
-        )
-        self.landmarker = mp_vision.FaceLandmarker.create_from_options(options)
-        self._last_ts_ms: int = -1   # для гарантии монотонности
 
-    def extract(
+        def _make_landmarker(dlg: str):
+            mp_delegate = (
+                mp_python.BaseOptions.Delegate.GPU if dlg == "gpu"
+                else mp_python.BaseOptions.Delegate.CPU
+            )
+            options = mp_vision.FaceLandmarkerOptions(
+                base_options=mp_python.BaseOptions(
+                    model_asset_path=str(model_path), delegate=mp_delegate),
+                running_mode=rm,
+                num_faces=1,
+                min_face_detection_confidence=min_face_detection_confidence,
+                min_face_presence_confidence=min_face_presence_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+            return mp_vision.FaceLandmarker.create_from_options(options)
+
+        self._last_ts_ms: int = -1   # для гарантии монотонности
+        self.delegate = "cpu"
+
+        if delegate == "gpu":
+            # GPU-делегат MediaPipe работает через OpenGL ES/EGL, что в
+            # headless-окружениях (Colab) часто недоступно. Пробуем и при
+            # любой ошибке тихо откатываемся на CPU.
+            try:
+                self.landmarker = _make_landmarker("gpu")
+                # Прогрев: ошибка EGL может вылезти только на первом detect
+                probe = mp.Image(
+                    image_format=mp.ImageFormat.SRGB,
+                    data=np.zeros((64, 64, 3), dtype=np.uint8))
+                if self.running_mode == "video":
+                    self.landmarker.detect_for_video(probe, 0)
+                    self._last_ts_ms = 0
+                else:
+                    self.landmarker.detect(probe)
+                self.delegate = "gpu"
+                log.info("MediaPipe: GPU-делегат активен")
+            except Exception as e:  # noqa: BLE001
+                log.warning("GPU-делегат недоступен (%s) — откат на CPU", e)
+                self.landmarker = _make_landmarker("cpu")
+        else:
+            self.landmarker = _make_landmarker("cpu")
+
+    def detect_lip_box(
         self,
         frame_bgr: np.ndarray,
         timestamp_ms: Optional[int] = None,
     ) -> Optional[np.ndarray]:
         """
-        Извлекает квадратный кроп губ из одного кадра.
-
-        Args:
-            frame_bgr:    np.ndarray (H, W, 3), uint8, BGR (как из cv2.imread).
-            timestamp_ms: timestamp в миллисекундах. Нужен только если
-                          running_mode="video". Должен расти от вызова к вызову.
-                          Если None — авто-инкремент на 40 мс (~25 FPS).
+        Находит рамку губ на кадре (без вырезания кропа).
 
         Returns:
-            np.ndarray (lip_size, lip_size) uint8 — серый кроп губ,
-            или None, если лицо не найдено.
+            np.ndarray [x0, y0, x1, y1] float32 (может выходить за края кадра —
+            обрезка делается в crop_box), или None, если лицо не найдено.
         """
         if frame_bgr is None or frame_bgr.size == 0:
             return None
@@ -265,10 +292,26 @@ class LipROIExtractor:
         cx = (x_min + x_max) / 2.0
         cy = (y_min + y_max) / 2.0
 
-        x0 = int(np.clip(cx - side / 2.0, 0, w - 1))
-        y0 = int(np.clip(cy - side / 2.0, 0, h - 1))
-        x1 = int(np.clip(cx + side / 2.0, 1, w))
-        y1 = int(np.clip(cy + side / 2.0, 1, h))
+        return np.array(
+            [cx - side / 2.0, cy - side / 2.0, cx + side / 2.0, cy + side / 2.0],
+            dtype=np.float32,
+        )
+
+    def crop_box(
+        self, frame_bgr: np.ndarray, box: np.ndarray
+    ) -> Optional[np.ndarray]:
+        """
+        Вырезает кроп губ по готовой рамке [x0, y0, x1, y1].
+
+        Returns:
+            np.ndarray (lip_size, lip_size) uint8 — серый кроп губ,
+            или None, если рамка вырожденная.
+        """
+        h, w = frame_bgr.shape[:2]
+        x0 = int(np.clip(box[0], 0, w - 1))
+        y0 = int(np.clip(box[1], 0, h - 1))
+        x1 = int(np.clip(box[2], 1, w))
+        y1 = int(np.clip(box[3], 1, h))
 
         if x1 - x0 < 8 or y1 - y0 < 8:
             # bbox получился вырожденный (лицо у самого края кадра)
@@ -280,6 +323,29 @@ class LipROIExtractor:
             gray, (self.lip_size, self.lip_size), interpolation=cv2.INTER_CUBIC
         )
         return resized
+
+    def extract(
+        self,
+        frame_bgr: np.ndarray,
+        timestamp_ms: Optional[int] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Извлекает квадратный кроп губ из одного кадра (детекция + кроп).
+
+        Args:
+            frame_bgr:    np.ndarray (H, W, 3), uint8, BGR (как из cv2.imread).
+            timestamp_ms: timestamp в миллисекундах. Нужен только если
+                          running_mode="video". Должен расти от вызова к вызову.
+                          Если None — авто-инкремент на 40 мс (~25 FPS).
+
+        Returns:
+            np.ndarray (lip_size, lip_size) uint8 — серый кроп губ,
+            или None, если лицо не найдено.
+        """
+        box = self.detect_lip_box(frame_bgr, timestamp_ms)
+        if box is None:
+            return None
+        return self.crop_box(frame_bgr, box)
 
     def close(self) -> None:
         self.landmarker.close()
@@ -312,6 +378,7 @@ def video_to_lip_tensor(
     video_path: str | Path,
     extractor: Optional[LipROIExtractor] = None,
     return_stats: bool = False,
+    detect_every: int = 1,
 ) -> Tuple[torch.Tensor, dict] | torch.Tensor:
     """
     Открывает видеофайл и возвращает тензор губных кропов всех кадров.
@@ -322,6 +389,11 @@ def video_to_lip_tensor(
                       чтобы не пересоздавать MediaPipe на каждый файл).
         return_stats: если True, дополнительно вернёт словарь со статистикой
                       (всего кадров, пропущенных кадров, FPS).
+        detect_every: запускать детекцию MediaPipe только на каждом N-м кадре
+                      (+ последнем), рамки между ними линейно интерполировать.
+                      Даёт ~N-кратное ускорение. Безопасно для статичных
+                      съёмок (GRID: диктор неподвижен). 1 = детекция на
+                      каждом кадре (старое поведение).
 
     Returns:
         Тензор (T_видео, 1, 96, 96) float32 в [0, 1].
@@ -355,19 +427,74 @@ def video_to_lip_tensor(
     frames: list[np.ndarray] = []
     n_total = 0
     n_missing = 0
+    n_keyframes = 0
+    n_keyframes_face = 0
 
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            ts_ms = int(n_total * 1000.0 / fps)
-            n_total += 1
-            crop = extractor.extract(frame, timestamp_ms=ts_ms)
-            if crop is None:
-                n_missing += 1
-                continue
-            frames.append(crop)
+        if detect_every <= 1:
+            # ── Старый путь: детекция на каждом кадре ────────────────────
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                ts_ms = int(n_total * 1000.0 / fps)
+                n_total += 1
+                crop = extractor.extract(frame, timestamp_ms=ts_ms)
+                if crop is None:
+                    n_missing += 1
+                    continue
+                frames.append(crop)
+        else:
+            # ── Быстрый путь: детекция на опорных кадрах + интерполяция ──
+            # 1) буферизуем все кадры (GRID: 75 кадров × 360×288×3 ≈ 23 МБ)
+            frames_bgr: list[np.ndarray] = []
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frames_bgr.append(frame)
+            n_total = len(frames_bgr)
+            if n_total == 0:
+                raise RuntimeError(f"В {video_path} не прочитано ни одного кадра.")
+
+            # 2) опорные кадры: каждый N-й + последний
+            key_idxs = list(range(0, n_total, detect_every))
+            if key_idxs[-1] != n_total - 1:
+                key_idxs.append(n_total - 1)
+            n_keyframes = len(key_idxs)
+
+            det_idx: list[int] = []
+            det_boxes: list[np.ndarray] = []
+            for i in key_idxs:
+                ts_ms = int(i * 1000.0 / fps)
+                box = extractor.detect_lip_box(frames_bgr[i], timestamp_ms=ts_ms)
+                if box is not None:
+                    det_idx.append(i)
+                    det_boxes.append(box)
+            n_keyframes_face = len(det_idx)
+
+            if not det_boxes:
+                raise RuntimeError(
+                    f"В {video_path} не обнаружено ни одного лица "
+                    f"(проверено {n_keyframes} опорных кадров)."
+                )
+
+            # 3) линейная интерполяция рамок на все кадры.
+            #    np.interp за пределами крайних опор держит крайние значения.
+            boxes = np.stack(det_boxes)               # (K, 4)
+            t_all = np.arange(n_total)
+            all_boxes = np.stack(
+                [np.interp(t_all, det_idx, boxes[:, k]) for k in range(4)],
+                axis=1,
+            )                                          # (T, 4)
+
+            # 4) кроп всех кадров по интерполированным рамкам
+            for i, fb in enumerate(frames_bgr):
+                crop = extractor.crop_box(fb, all_boxes[i])
+                if crop is None:
+                    n_missing += 1
+                    continue
+                frames.append(crop)
     finally:
         cap.release()
         if own_extractor:
@@ -394,6 +521,9 @@ def video_to_lip_tensor(
         "frames_with_face": len(frames),
         "missing_frames": n_missing,
         "header_total": total_in_header,
+        "detect_every": detect_every,
+        "keyframes": n_keyframes,
+        "keyframes_with_face": n_keyframes_face,
     }
     if return_stats:
         return tensor, stats

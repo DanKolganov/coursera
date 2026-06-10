@@ -200,7 +200,8 @@ def _find_videos_and_aligns(spk_raw: Path) -> tuple[list[Path], dict[str, Path]]
 
 
 def process_speaker(spk: str, raw_dir: Path, processed_dir: Path,
-                    lip_ext: LipROIExtractor) -> list[dict]:
+                    lip_ext: LipROIExtractor,
+                    detect_every: int = 1) -> list[dict]:
     """Обрабатывает все видео одного спикера. Возвращает записи манифеста."""
     spk_raw = raw_dir / spk
     spk_proc = processed_dir / spk
@@ -236,7 +237,8 @@ def process_speaker(spk: str, raw_dir: Path, processed_dir: Path,
         if not lip_npy.exists():
             try:
                 tensor, stats = video_to_lip_tensor(
-                    mpg, extractor=lip_ext, return_stats=True)
+                    mpg, extractor=lip_ext, return_stats=True,
+                    detect_every=detect_every)
                 arr = (tensor.squeeze(1).numpy() * 255).astype(np.uint8)
                 np.save(str(lip_npy), arr)
             except Exception as e:
@@ -320,6 +322,14 @@ def main() -> int:
                         help="доля val при случайном сплите")
     parser.add_argument("--skip-download", action="store_true",
                         help="не качать (если архивы уже распакованы)")
+    parser.add_argument("--detect-every", default=5, type=int,
+                        help="детекция MediaPipe на каждом N-м кадре, "
+                             "рамки между ними интерполируются (~N-кратное "
+                             "ускорение). 1 = на каждом кадре. По умолчанию 5 "
+                             "(безопасно для GRID: диктор статичен)")
+    parser.add_argument("--delegate", default="cpu", choices=["cpu", "gpu"],
+                        help="делегат MediaPipe. 'gpu' пробует OpenGL ES/EGL "
+                             "и при ошибке сам откатывается на CPU")
     args = parser.parse_args()
 
     # Парсим speakers
@@ -351,7 +361,9 @@ def main() -> int:
 
     # ── 2. Препроцессинг ───────────────────────────────────────────────
     all_records: list[dict] = []
-    with LipROIExtractor() as lip_ext:
+    log.info("MediaPipe: delegate=%s, detect_every=%d",
+             args.delegate, args.detect_every)
+    with LipROIExtractor(delegate=args.delegate) as lip_ext:
         for spk in speakers:
             spk_raw = raw_dir / spk
             # Ищем хотя бы один .mpg рекурсивно (структура архива может
@@ -360,7 +372,8 @@ def main() -> int:
             if not has_videos:
                 log.warning("[%s] не найдено .mpg в %s — пропуск", spk, spk_raw)
                 continue
-            recs = process_speaker(spk, raw_dir, processed_dir, lip_ext)
+            recs = process_speaker(spk, raw_dir, processed_dir, lip_ext,
+                                   detect_every=args.detect_every)
             all_records.extend(recs)
 
     log.info("Всего обработано: %d записей", len(all_records))
