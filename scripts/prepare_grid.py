@@ -95,11 +95,14 @@ SHEFFIELD_BASE = "https://spandh.dcs.shef.ac.uk/gridcorpus"
 def download_speaker(spk: str, raw_dir: Path) -> bool:
     """Скачивает и распаковывает архивы для одного спикера. Идемпотентно."""
     spk_dir = raw_dir / spk
-    video_dir = spk_dir / "video"
-    align_dir = spk_dir / "align"
 
-    if video_dir.exists() and any(video_dir.iterdir()) and \
-       align_dir.exists() and any(align_dir.iterdir()):
+    # ВАЖНО: архив Sheffield распаковывается в разную структуру
+    # (s1/s1/*.mpg, s1/video/*.mpg, ...), поэтому проверяем рекурсивно —
+    # так же, как потом ищет препроцессинг (_find_videos_and_aligns).
+    has_mpg = spk_dir.exists() and any(spk_dir.rglob("*.mpg"))
+    has_align = spk_dir.exists() and any(spk_dir.rglob("*.align"))
+
+    if has_mpg and has_align:
         log.info("[%s] уже распакован, пропускаю", spk)
         return True
 
@@ -108,7 +111,7 @@ def download_speaker(spk: str, raw_dir: Path) -> bool:
     # Видео
     video_url = f"{SHEFFIELD_BASE}/{spk}/video/{spk}.mpg_vcd.zip"
     video_zip = spk_dir / "video.zip"
-    if not video_zip.exists() and not video_dir.exists():
+    if not video_zip.exists() and not has_mpg:
         log.info("[%s] скачиваю видео: %s", spk, video_url)
         r = subprocess.run(["wget", "-q", "-O", str(video_zip), video_url])
         if r.returncode != 0:
@@ -121,7 +124,7 @@ def download_speaker(spk: str, raw_dir: Path) -> bool:
     # Алайны
     align_url = f"{SHEFFIELD_BASE}/{spk}/align/{spk}.tar"
     align_tar = spk_dir / "align.tar"
-    if not align_tar.exists() and not align_dir.exists():
+    if not align_tar.exists() and not has_align:
         log.info("[%s] скачиваю align", spk)
         r = subprocess.run(["wget", "-q", "-O", str(align_tar), align_url])
         if r.returncode != 0:
