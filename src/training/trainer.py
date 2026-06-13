@@ -213,6 +213,13 @@ class Trainer:
                 # Нормируем на grad_accum для корректной величины градиентов
                 loss_scaled = loss / self.grad_accum
 
+            # NaN/inf-guard: битый сэмпл (повреждённый mpg → NaN в аудио) даёт
+            # неконечный loss, который ломает веса. zero_infinity в CTC ловит inf,
+            # но не NaN. Пропускаем такой батч целиком, не делая backward.
+            if not torch.isfinite(loss):
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
+
             self.scaler.scale(loss_scaled).backward()
 
             total_loss += loss.item()

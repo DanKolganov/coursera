@@ -49,13 +49,13 @@ model:
 
 training:
   optimizer: adamw
-  lr: 1.0e-4
+  lr: 1.0e-5              # 1e-4 расходился на пике warmup (CTC+Whisper); 1e-5 — стабильно
   weight_decay: 0.01
   warmup_steps: 300       # GRID маленький — короткий warmup
   max_epochs: 5           # для фиксированной грамматики достаточно
   patience: 3
   grad_clip: 5.0
-  mixed_precision: true
+  mixed_precision: false  # fp16 даёт NaN в Whisper-энкодере → loss=inf; fp32 стабильно
   label_smoothing: 0.0
 
 augmentation:
