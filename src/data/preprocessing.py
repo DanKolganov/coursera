@@ -121,19 +121,45 @@ def waveform_to_mel(
         if peak > 1e-6:
             waveform = waveform / peak
 
-    # 5) лог-мел через torchaudio
-    mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=SAMPLE_RATE,
-        n_fft=N_FFT,
-        win_length=WIN_LENGTH,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS,
-        power=2.0,   # spectrogram of power, not amplitude
-        center=True,
-    )
-    mel = mel_transform(waveform)            # (N_MELS, T_mel)
-    log_mel = torch.log(mel + 1e-9)
-    return log_mel
+    # 5) лог-мел ТОЧНО как у Whisper.
+    #
+    # КРИТИЧНО: энкодер Whisper обучался на своём log-mel и без него выдаёт
+    # мусор (вход вне распределения). Поэтому повторяем его feature extractor:
+    #   - n_fft=400 (→ 201 частотная полоса), hop=160, окно Хэнна;
+    #   - мел-фильтрбанк slaney (scale=slaney, norm=slaney), f_max=8000;
+    #   - нормализация: log10(clamp(mel,1e-10)), затем max(x, x.max()-8),
+    #     затем (x+4)/4  → диапазон ≈ [-1, 1].
+    # (Раньше тут был htk-фильтрбанк + natural log без нормализации, диапазон
+    #  ~[-20,5] — это и ломало обучение.)
+    mel = _whisper_mel_transform()(waveform)        # (N_MELS, T_mel), power
+    log_spec = torch.clamp(mel, min=1e-10).log10()
+    log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+    log_spec = (log_spec + 4.0) / 4.0
+    return log_spec
+
+
+# Whisper-совместимый мел-трансформ: строим один раз и кешируем (фильтрбанк
+# считается на CPU, незачем пересоздавать на каждый клип).
+_WHISPER_MEL = None
+
+
+def _whisper_mel_transform() -> "torchaudio.transforms.MelSpectrogram":
+    global _WHISPER_MEL
+    if _WHISPER_MEL is None:
+        _WHISPER_MEL = torchaudio.transforms.MelSpectrogram(
+            sample_rate=SAMPLE_RATE,
+            n_fft=400,            # Whisper: 400 → 201 частотная полоса
+            win_length=400,
+            hop_length=HOP_LENGTH,
+            n_mels=N_MELS,
+            f_min=0.0,
+            f_max=8000.0,
+            power=2.0,
+            center=True,
+            norm="slaney",        # как в WhisperFeatureExtractor
+            mel_scale="slaney",
+        )
+    return _WHISPER_MEL
 
 
 # =============================================================================
