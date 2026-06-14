@@ -33,7 +33,10 @@ model:
 
   audio_encoder:
     name: openai/whisper-small
-    freeze: true
+    freeze: false           # замороженный Whisper + линейная CTC-голова не учится
+                            # (overfit на 10 примерах не сходится: CER плато 87%).
+                            # Whisper-фичи под seq2seq, не под CTC — энкодер надо
+                            # дообучать под задачу.
     d_audio: 768
 
   video_encoder:
