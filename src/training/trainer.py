@@ -336,6 +336,11 @@ class Trainer:
         tcfg = self.cfg.training
         max_epochs = max_epochs or int(tcfg.max_epochs)
         patience = patience or int(tcfg.get("patience", 5))
+        # Как часто сохранять last.pt. По умолчанию каждую эпоху (для
+        # возобновления на нестабильном Colab). На overfit-тесте эпохи —
+        # секунды, а чекпоинт (модель+оптимизатор AdamW ≈ 1 ГБ) сохраняется
+        # дольше самой эпохи, поэтому там ставим большое значение.
+        save_every = max(1, int(tcfg.get("save_every_n_epochs", 1)))
 
         epochs_no_improve = 0
         start_time = time.time()
@@ -385,7 +390,8 @@ class Trainer:
                 )
 
             # Сохраняем последний чекпоинт (для возобновления)
-            self.save_checkpoint(self.output_dir / "last.pt", epoch)
+            if (epoch + 1) % save_every == 0 or (epoch + 1) == max_epochs:
+                self.save_checkpoint(self.output_dir / "last.pt", epoch)
 
         if self.writer:
             self.writer.close()
